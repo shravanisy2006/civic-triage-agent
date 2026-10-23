@@ -51,7 +51,8 @@ flowchart LR
 
 ## Security
 - **Secrets** only in `.env` (git-ignored); `.env.example` documents them.
-- **Uploads:** real file type checked with Pillow (not the extension), 5 MB and pixel limits
+- **Uploads:** file signature (magic number) checked *before* decoding, then confirmed by Pillow;
+  extension is ignored; 5 MB and pixel limits
   (blocks decompression bombs), corrupted files rejected.
 - **Privacy:** every image is re-encoded, which removes all metadata including **GPS location**;
   phone numbers, emails and Aadhaar-like numbers are **redacted** before storage or AI processing.
@@ -62,7 +63,12 @@ flowchart LR
   and bounded severity mean the model cannot invent departments or scores.
 - **Decisions in code, not in the LLM** — priority and routing are deterministic and tested.
 - **SQL injection:** all queries parameterised.
-- **Access control:** officer dashboard behind a PIN compared in constant time (`hmac.compare_digest`).
+- **Access control:** officer dashboard behind a PIN compared in constant time (`hmac.compare_digest`),
+  locked for 5 minutes after 5 wrong attempts; failures and lockouts are audit-logged.
+- **Output encoding:** citizen text and AI summaries are HTML-escaped or Markdown-escaped before
+  display, so a report can't inject links, images or formatting into the officer dashboard.
+- **Database writes:** inserts accept only whitelisted columns; statuses are validated; every
+  transaction rolls back on error; WAL mode + busy timeout for concurrent sessions.
 - **Abuse:** per-session rate limit (5 reports/min); duplicate boost capped so it can't be spammed.
 - **Audit log** of logins, rejected inputs, flags and status changes. Errors shown to users are generic.
 
@@ -71,7 +77,9 @@ flowchart LR
 - **Images downscaled** to 1024 px before sending → fewer tokens, lower latency.
 - **One Gemini call per report** (structured output, no multi-turn chatter).
 - **Timeout (20 s) + one retry + fallback** → the system always responds.
-- Index on `(area_key, category, status)` for fast duplicate lookup.
+- Indexes on `(area_key, category, status)` (duplicates), `(status, priority)` (queue order),
+  `image_hash` (identical-photo check) and `duplicate_of` (linked reports).
+- Dashboard KPIs computed with a single SQL aggregate; lists and charts skip the image BLOBs.
 - Live metrics: average latency, cache hit rate, fallback rate.
 
 ### Measured results
@@ -87,7 +95,7 @@ Run `python -m eval.run_eval` on 15 labelled reports (including one injection at
 \*The fallback's keywords were tuned on these same 15 samples, so its numbers are optimistic;
 it exists to keep the service running, not to replace Gemini.
 
-**24 automated tests** (`pytest`) cover upload validation, EXIF removal, PII redaction, injection
+**48 automated tests** (`pytest`) cover upload validation, EXIF removal, PII redaction, injection
 detection, rate limiting, scoring, routing, persistence, duplicate matching, status history, the full pipeline, and the Gemini path (valid output,
 invalid JSON + retry, out-of-range values, timeouts, bad key without leaking it, caching) using a
 fake client, so they run offline.

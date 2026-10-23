@@ -75,7 +75,7 @@ def process_report(image_bytes: bytes | None, description: str, area: str,
 
     # 3. Decisions in deterministic code
     if flagged:  # never let a manipulated report jump the queue
-        analysis = analysis.model_copy(update={"confidence": min(analysis.confidence, 0.29)})
+        analysis = analysis.model_copy(update={"confidence": min(analysis.confidence, rules.LOW_CONFIDENCE - 0.01)})
     dups = db.find_duplicates(area, analysis.category.value)
     score = rules.priority_score(analysis, len(dups))
     label = rules.priority_label(score)

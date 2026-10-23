@@ -2,9 +2,11 @@
 import json
 import sqlite3
 from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 from src import config
+from src.schemas import STATUSES
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS reports (
@@ -31,6 +33,9 @@ CREATE TABLE IF NOT EXISTS reports (
     is_demo INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_dup ON reports(area_key, category, status);
+CREATE INDEX IF NOT EXISTS idx_queue ON reports(status, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_image_hash ON reports(image_hash);
+CREATE INDEX IF NOT EXISTS idx_duplicate_of ON reports(duplicate_of);
 CREATE TABLE IF NOT EXISTS ai_cache (
     cache_key TEXT PRIMARY KEY,
     analysis_json TEXT NOT NULL,
@@ -55,20 +60,39 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Columns the application is allowed to write. insert_report() rejects anything else, so
+# column names (which cannot be parameterised in SQL) never come from untrusted input.
+WRITABLE_COLUMNS = frozenset({
+    "area", "description", "image", "image_hash", "category", "severity", "hazard", "summary",
+    "confidence", "priority", "priority_label", "department", "duplicate_of", "source", "flagged",
+    "explanation", "is_demo",
+})
+# Every column except the image BLOB: used for lists and counts so photos aren't loaded needlessly.
+LIST_COLUMNS = ("id, created_at, area, area_key, description, image_hash, category, severity, hazard, "
+                "summary, confidence, priority, priority_label, department, duplicate_of, status, source, "
+                "flagged, explanation, is_demo")
+
+
 @contextmanager
-def connect():
+def connect() -> Iterator[sqlite3.Connection]:
+    """Open a connection that commits on success and rolls back on any error."""
     config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(config.DB_PATH)
+    conn = sqlite3.connect(config.DB_PATH, timeout=10)  # wait instead of failing when another session writes
     conn.row_factory = sqlite3.Row
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
-def init_db():
+def init_db() -> None:
+    """Create tables and indexes if missing and migrate databases from earlier versions."""
     with connect() as c:
+        c.execute("PRAGMA journal_mode=WAL")  # readers don't block the writer across sessions
         c.executescript(SCHEMA)
         # Lightweight migration for databases created by earlier versions
         cols = {r["name"] for r in c.execute("PRAGMA table_info(reports)")}
@@ -157,6 +181,10 @@ def linked_reports(report_id: int) -> list[dict]:
 
 
 def insert_report(r: dict) -> int:
+    """Insert a report and return its new unique id."""
+    unknown = set(r) - WRITABLE_COLUMNS
+    if unknown:
+        raise ValueError(f"Refusing to write unknown columns: {sorted(unknown)}")
     cols = list(r.keys()) + ["created_at", "area_key"]
     vals = list(r.values()) + [_now(), area_key(r["area"])]
     placeholders = ", ".join("?" for _ in cols)
@@ -179,8 +207,11 @@ def bump_priority(report_id: int, new_priority: int, new_label: str, by_report: 
         )
 
 
-def list_reports(status: str | None = None, department: str | None = None) -> list[dict]:
-    q = "SELECT * FROM reports WHERE 1=1"
+def list_reports(status: str | None = None, department: str | None = None,
+                 with_image: bool = True) -> list[dict]:
+    """Reports ordered for the queue: unresolved first, then highest priority, then oldest.
+    Pass with_image=False when photos are not displayed (counts, charts, pickers)."""
+    q = f"SELECT {'*' if with_image else LIST_COLUMNS} FROM reports WHERE 1=1"
     params: list = []
     if status and status != "All":
         q += " AND status = ?"
@@ -193,7 +224,22 @@ def list_reports(status: str | None = None, department: str | None = None) -> li
         return [dict(r) for r in c.execute(q, params).fetchall()]
 
 
-def update_status(report_id: int, status: str):
+def report_counts() -> dict[str, int]:
+    """KPI figures computed in SQL, without loading any report rows into memory."""
+    with connect() as c:
+        row = c.execute(
+            """SELECT COUNT(*) AS total,
+                      COALESCE(SUM(status != 'Resolved'), 0) AS unresolved,
+                      COALESCE(SUM(status = 'Resolved'), 0) AS resolved,
+                      COALESCE(SUM(status != 'Resolved' AND priority_label LIKE 'P1%'), 0) AS critical_open
+               FROM reports""").fetchone()
+    return dict(row)
+
+
+def update_status(report_id: int, status: str) -> None:
+    """Persist an officer's status change. Only known statuses are accepted."""
+    if status not in STATUSES:
+        raise ValueError(f"Unknown status: {status!r}")
     with connect() as c:
         c.execute("UPDATE reports SET status = ? WHERE id = ?", (status, report_id))
 

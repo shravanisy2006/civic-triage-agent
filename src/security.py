@@ -1,6 +1,7 @@
 """Input security: image validation + metadata stripping, PII redaction,
 prompt-injection detection, length limits and rate limiting."""
 import hashlib
+import hmac
 import io
 import re
 import time
@@ -15,6 +16,25 @@ class ValidationError(ValueError):
 
 
 # ---------- Images ----------
+# File signatures ("magic numbers"). Checked before any image decoder touches the bytes.
+_SIGNATURES = {
+    "JPEG": (b"\xff\xd8\xff",),
+    "PNG": (b"\x89PNG\r\n\x1a\n",),
+    "WEBP": (b"RIFF",),  # plus b"WEBP" at offset 8, checked below
+}
+
+
+def sniff_image_type(data: bytes) -> str | None:
+    """Return 'JPEG', 'PNG' or 'WEBP' from the file header, or None if it is not one of them."""
+    if data.startswith(_SIGNATURES["JPEG"]):
+        return "JPEG"
+    if data.startswith(_SIGNATURES["PNG"]):
+        return "PNG"
+    if data.startswith(_SIGNATURES["WEBP"]) and data[8:12] == b"WEBP":
+        return "WEBP"
+    return None
+
+
 def validate_and_clean_image(data: bytes) -> tuple[bytes, str]:
     """Check size, real file type (not just the extension) and dimensions,
     then re-encode the image. Re-encoding drops ALL metadata, including GPS (EXIF).
@@ -23,14 +43,17 @@ def validate_and_clean_image(data: bytes) -> tuple[bytes, str]:
         raise ValidationError("The uploaded file is empty.")
     if len(data) > config.MAX_IMAGE_BYTES:
         raise ValidationError("Image is larger than 5 MB.")
+    declared = sniff_image_type(data)
+    if declared is None:
+        raise ValidationError("Only JPG, PNG or WEBP images are allowed.")
     try:
         with Image.open(io.BytesIO(data)) as probe:
             fmt = probe.format
             probe.verify()  # detects truncated / corrupted files
     except (UnidentifiedImageError, OSError, SyntaxError):
         raise ValidationError("File is not a valid image.")
-    if fmt not in config.ALLOWED_FORMATS:
-        raise ValidationError(f"Only JPG, PNG or WEBP images are allowed (got {fmt}).")
+    if fmt not in config.ALLOWED_FORMATS or fmt != declared:
+        raise ValidationError("Only JPG, PNG or WEBP images are allowed.")
 
     img = Image.open(io.BytesIO(data))
     if img.width * img.height > config.MAX_IMAGE_PIXELS:
@@ -84,6 +107,44 @@ def normalise_area(area: str) -> str:
     if not re.fullmatch(r"[\w\s,.\-/#()]+", area):
         raise ValidationError("Area contains unsupported characters.")
     return area
+
+
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~$])")
+
+
+def md_escape(text: str | None) -> str:
+    """Escape Markdown so user- or AI-supplied text is shown literally (no links, images or
+    formatting) when passed to Streamlit elements that render Markdown."""
+    return _MD_SPECIAL.sub(r"\\\1", text or "")
+
+
+# ---------- Officer login ----------
+class LoginGuard:
+    """Locks officer login for a period after repeated wrong PINs (per session)."""
+
+    def __init__(self, max_failures: int = 5, lockout_s: int = 300):
+        self.max_failures = max_failures
+        self.lockout_s = lockout_s
+        self.failures = 0
+        self.locked_until = 0.0
+
+    def seconds_locked(self, now: float | None = None) -> int:
+        now = time.time() if now is None else now
+        return max(0, int(self.locked_until - now))
+
+    def check(self, pin: str, expected: str, now: float | None = None) -> bool:
+        """Constant-time PIN comparison; returns False (without comparing) while locked out."""
+        now = time.time() if now is None else now
+        if self.seconds_locked(now):
+            return False
+        if pin and hmac.compare_digest(pin.encode(), expected.encode()):
+            self.failures = 0
+            return True
+        self.failures += 1
+        if self.failures >= self.max_failures:
+            self.locked_until = now + self.lockout_s
+            self.failures = 0
+        return False
 
 
 # ---------- Rate limiting ----------

@@ -1,6 +1,5 @@
 """Civic Issue Triage Agent - Streamlit UI.
 Run with:  streamlit run app.py"""
-import hmac
 from html import escape
 
 import pandas as pd
@@ -9,7 +8,8 @@ import streamlit as st
 from src import ai, config, db, demo
 from src.pipeline import process_report
 from src.schemas import DEPARTMENTS, STATUSES, Category
-from src.security import RateLimiter, ValidationError
+from src.rules import sla_hours
+from src.security import LoginGuard, RateLimiter, ValidationError, md_escape
 
 st.set_page_config(page_title="CivicFlow AI", page_icon="🏙️", layout="wide")
 db.init_db()
@@ -17,6 +17,7 @@ db.init_db()
 st.session_state.setdefault("limiter", RateLimiter())
 st.session_state.setdefault("officer_ok", False)
 st.session_state.setdefault("last_result", None)
+st.session_state.setdefault("login_guard", LoginGuard())
 
 # Priority colours (text, background) chosen for >= 4.5:1 contrast on the dark theme
 PRIORITY_STYLE = {"P1": ("#fecaca", "#7f1d1d"), "P2": ("#fed7aa", "#7c2d12"),
@@ -109,6 +110,18 @@ def source_badge(source: str) -> str:
     return {"gemini": badge("AI analysis · Gemini", "b-ai"),
             "cache": badge("AI analysis · cached", "b-cache"),
             "fallback": badge("Rule-based estimate", "b-rule")}[source]
+
+
+def report_badges(r: dict) -> str:
+    """Badges for a stored report: priority, analysis source and any warning flags."""
+    out = priority_badge(r["priority_label"]) + source_badge(r["source"])
+    if r["is_demo"]:
+        out += badge("SAMPLE input", "b-demo")
+    if r["hazard"]:
+        out += badge("Safety hazard", "b-flag")
+    if r["flagged"]:
+        out += badge("Possible prompt injection", "b-flag")
+    return out
 
 
 def fmt_ms(ms: float) -> str:
@@ -216,7 +229,7 @@ def render_result(r):
               help="Gemini's self-reported confidence in the category. Not available for rule-based estimates.")
     c4, c5, c6 = st.columns(3)
     c4.metric("Priority score", f"{r.priority} / 100")
-    c5.metric("Response target", f"{rules_sla(r.label)} h")
+    c5.metric("Response target", f"{sla_hours(r.label)} h")
     c6.metric("Scan duration", fmt_ms(r.total_ms),
               help="End-to-end time: validation, AI analysis (or cache), scoring and storage")
     st.write(f"**Recommended department:** {r.department}")
@@ -230,13 +243,8 @@ def render_result(r):
         st.warning("Your description contained unusual instructions, so it was sent for manual review.")
     with st.expander("How the agent decided"):
         for i, s in enumerate(r.steps, 1):
-            st.write(f"{i}. {s}")
+            st.write(f"{i}. {md_escape(s)}")
         st.caption(f"Analysis source: {r.source} · AI step {r.latency_ms:.0f} ms · total {r.total_ms:.0f} ms")
-
-
-def rules_sla(label: str) -> int:
-    from src.rules import sla_hours
-    return sla_hours(label)
 
 
 # ---------------- Officer page ----------------
@@ -248,27 +256,32 @@ def officer_page():
         with st.form("login", border=True):
             pin = st.text_input("Officer PIN", type="password")
             ok = st.form_submit_button("Unlock dashboard", type="primary")
+        guard: LoginGuard = st.session_state.login_guard
         if ok:
-            if pin and hmac.compare_digest(pin.encode(), config.OFFICER_PIN.encode()):
+            if guard.check(pin, config.OFFICER_PIN):
                 st.session_state.officer_ok = True
                 db.audit("officer_login")
                 st.rerun()
             db.audit("officer_login_failed")
-            st.error("Incorrect PIN.")
+            if guard.seconds_locked():
+                db.audit("officer_lockout")
+            else:
+                st.error("Incorrect PIN.", icon="🔒")
+        if guard.seconds_locked():
+            st.error(f"Too many incorrect attempts. Try again in {guard.seconds_locked() // 60 + 1} minute(s).")
         st.caption("The PIN is set by OFFICER_PIN in .env (or Streamlit secrets when deployed).")
         if config.USING_DEFAULT_PIN:
             st.warning("The default demo PIN is in use. Set OFFICER_PIN before deploying.")
         return
 
-    everything = db.list_reports("All")
-    unresolved = [r for r in everything if r["status"] != "Resolved"]
-    kpis = [("Total reports", len(everything), "#3b82f6"),
-            ("Critical open (P1)", sum(r["priority_label"].startswith("P1") for r in unresolved), "#ef4444"),
-            ("Unresolved", len(unresolved), "#f59e0b"),
-            ("Resolved", len(everything) - len(unresolved), "#34d399")]
+    counts = db.report_counts()
+    kpis = [("Total reports", counts["total"], "#3b82f6"),
+            ("Critical open (P1)", counts["critical_open"], "#ef4444"),
+            ("Unresolved", counts["unresolved"], "#f59e0b"),
+            ("Resolved", counts["resolved"], "#34d399")]
     for col, (label, value, colour) in zip(st.columns(4), kpis):
-        col.markdown(f'<div class="kpi" style="--kpi:{colour}"><div class="l">{label}</div>'
-                     f'<div class="v">{value}</div></div>', unsafe_allow_html=True)
+        col.markdown(f'<div class="kpi" style="--kpi:{colour}" role="group" aria-label="{label}: {value}">'
+                     f'<div class="l">{label}</div><div class="v">{value}</div></div>', unsafe_allow_html=True)
     st.write("")
 
     query = st.text_input("Search incidents", placeholder="Search by area, summary or description",
@@ -313,16 +326,10 @@ def officer_page():
             prefix = "SAMPLE · " if r["is_demo"] else ""
             dot = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "P4": "🟢"}[r["priority_label"][:2]]
             title = (f"{dot} {prefix}#{r['id']} · {r['priority_label']} ({r['priority']}) · "
-                     f"{nice(r['category'])} · sev {r['severity']}/5 · {r['area']} · "
+                     f"{nice(r['category'])} · sev {r['severity']}/5 · {md_escape(r['area'])} · "
                      f"{r['department']} · {r['status']}")
             with st.expander(title, expanded=r["priority_label"].startswith("P1") and r["status"] != "Resolved"):
-                badges = priority_badge(r["priority_label"]) + source_badge(r["source"])
-                if r["is_demo"]:
-                    badges += badge("SAMPLE input", "b-demo")
-                if r["hazard"]:
-                    badges += badge("Safety hazard", "b-flag")
-                if r["flagged"]:
-                    badges += badge("Possible prompt injection", "b-flag")
+                badges = report_badges(r)
                 left, right = st.columns([1, 2])
                 with left:
                     if r["image"]:
@@ -331,8 +338,8 @@ def officer_page():
                         st.caption("No photo submitted")
                 with right:
                     st.markdown(badges, unsafe_allow_html=True)
-                    st.write(f"**Summary:** {r['summary']}")
-                    st.write(f"**Citizen said:** {r['description'] or '-'}")
+                    st.write(f"**Summary:** {md_escape(r['summary'])}")
+                    st.write(f"**Citizen said:** {md_escape(r['description']) or '-'}")
                     st.write(f"**Department:** {r['department']} · **Severity:** {r['severity']}/5")
                     st.caption(f"{r['explanation']} · confidence {conf_text(r)} · submitted {r['created_at']} UTC")
                     if r["duplicate_of"]:
@@ -364,20 +371,14 @@ def conf_text(r: dict) -> str:
 
 
 def incident_detail():
-    all_reports = db.list_reports("All")
+    all_reports = db.list_reports("All", with_image=False)
     if not all_reports:
         st.info("**No incidents stored yet.**")
         return
     ids = sorted(r["id"] for r in all_reports)
     rid = st.selectbox("Select incident", ids, index=len(ids) - 1, format_func=lambda i: f"#{i}")
     r = db.get_report(rid)
-    badges = priority_badge(r["priority_label"]) + source_badge(r["source"])
-    if r["is_demo"]:
-        badges += badge("SAMPLE input", "b-demo")
-    if r["hazard"]:
-        badges += badge("Safety hazard", "b-flag")
-    if r["flagged"]:
-        badges += badge("Possible prompt injection", "b-flag")
+    badges = report_badges(r)
     st.markdown(f'<div class="card"><div class="muted">Incident #{r["id"]} · {escape(r["area"])} · '
                 f'submitted {escape(r["created_at"])} UTC</div><h3>{escape(nice(r["category"]))}</h3>{badges}'
                 f'<p style="margin:.6rem 0 0 0">{escape(r["summary"] or "")}</p></div>', unsafe_allow_html=True)
@@ -392,8 +393,8 @@ def incident_detail():
         c1.metric("Severity", f"{r['severity']} / 5")
         c2.metric("Priority", f"{r['priority']} / 100")
         c3.metric("Status", r["status"])
-        st.write(f"**Department:** {r['department']} · **Response target:** {rules_sla(r['priority_label'])} h")
-        st.write(f"**Citizen said:** {r['description'] or '-'}")
+        st.write(f"**Department:** {r['department']} · **Response target:** {sla_hours(r['priority_label'])} h")
+        st.write(f"**Citizen said:** {md_escape(r['description']) or '-'}")
         st.caption(f"{r['explanation']} · AI confidence {conf_text(r)}")
         if r["duplicate_of"]:
             st.caption(f"Duplicate of incident #{r['duplicate_of']}")
@@ -439,7 +440,7 @@ def metrics_page():
             st.bar_chart(pd.DataFrame(m["by_category"]), x="category", y="n", height=260)
         else:
             st.caption("No reports stored.")
-    pri = pd.Series([r["priority_label"] for r in db.list_reports("All")]).value_counts().sort_index()
+    pri = pd.Series([r["priority_label"] for r in db.list_reports("All", with_image=False)]).value_counts().sort_index()
     if not pri.empty:
         st.markdown("**Priority distribution (all stored reports)**")
         st.bar_chart(pri.rename_axis("priority").reset_index(name="reports"), x="priority", y="reports",
