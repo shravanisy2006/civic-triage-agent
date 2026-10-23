@@ -7,11 +7,25 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+def _secret(name: str, default: str = "") -> str:
+    """Read a setting from the environment (.env locally), or from Streamlit secrets when deployed
+    on Streamlit Community Cloud. Secrets are never written to code or logs."""
+    value = os.getenv(name)
+    if value is None:
+        try:
+            import streamlit as st
+            value = st.secrets.get(name)
+        except Exception:  # no secrets file configured - that's fine locally
+            value = None
+    return str(value if value is not None else default).strip()
+
+
+GEMINI_API_KEY = _secret("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
 GEMINI_TIMEOUT_MS = int(os.getenv("GEMINI_TIMEOUT_MS", "20000"))
 
-OFFICER_PIN = os.getenv("OFFICER_PIN", "1234").strip()
+OFFICER_PIN = _secret("OFFICER_PIN", "1234")
+USING_DEFAULT_PIN = OFFICER_PIN == "1234"
 
 DB_PATH = Path(os.getenv("DB_PATH", str(ROOT / "data" / "civic.db")))
 

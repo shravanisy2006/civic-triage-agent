@@ -1,9 +1,9 @@
 [theme]
-base = "light"
-primaryColor = "#1d4ed8"
-backgroundColor = "#f8fafc"
-secondaryBackgroundColor = "#eef2f7"
-textColor = "#0f172a"
+base = "dark"
+primaryColor = "#0e7490"   # white text on this colour = ~5.4:1 contrast (WCAG AA)
+backgroundColor = "#0b1220"
+secondaryBackgroundColor = "#131c2e"
+textColor = "#e6edf7"
 font = "sans serif"
 
 [server]

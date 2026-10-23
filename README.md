@@ -1,4 +1,4 @@
-# 🛠️ Civic Issue Triage Agent
+# 🏙️ CivicFlow AI — Civic Issue Triage Agent
 
 An AI agent that turns a citizen's **photo + short description** of a civic problem (pothole, garbage,
 broken streetlight, water leak, fallen tree) into a **prioritised, routed, de-duplicated work order**
@@ -128,8 +128,28 @@ Git Bash: use `source venv/Scripts/activate` and `cp .env.example .env` instead.
 | "Free-tier rate limit reached" | Wait a minute; repeated reports are served from cache |
 | "running scripts is disabled" (PowerShell) | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
 
+## Accessibility
+- Every input has a visible label; errors are shown as text next to the form, not by colour alone.
+- Priority is conveyed by text label (P1–P4) plus colour; badge and button colours meet WCAG AA
+  contrast on the dark theme.
+- Native Streamlit controls are keyboard-operable; the hero animation respects `prefers-reduced-motion`.
+- Layout stacks to one column on phones (verified at 390 px width with no horizontal scrolling).
+
+## Deploy (Streamlit Community Cloud, free)
+1. Push this repo to GitHub (public).
+2. Go to share.streamlit.io → **Create app** → pick the repo, branch `main`, file `app.py`.
+3. In **Advanced settings → Secrets** paste:
+   ```toml
+   GEMINI_API_KEY = "your-key"
+   OFFICER_PIN = "your-pin"
+   ```
+4. Deploy. Keys are read from Streamlit secrets (`src/config.py`), never from the repo.
+
+Note: the hosted SQLite file is reset when the app restarts; use *Load sample data* for demos.
+
 ## Known limitations
 - Officer access is a single shared PIN (adequate for a demo; production would use real accounts).
+- No map view: reports store a locality name, not coordinates (photo GPS is removed for privacy).
 - Duplicate detection matches area text + category, not GPS coordinates.
 - SQLite suits a single server; a multi-user deployment would move to a hosted database.
 

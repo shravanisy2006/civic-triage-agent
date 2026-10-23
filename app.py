@@ -8,38 +8,92 @@ import streamlit as st
 
 from src import ai, config, db, demo
 from src.pipeline import process_report
-from src.schemas import DEPARTMENTS, STATUSES
+from src.schemas import DEPARTMENTS, STATUSES, Category
 from src.security import RateLimiter, ValidationError
 
-st.set_page_config(page_title="Civic Triage Agent", page_icon="🛠️", layout="wide")
+st.set_page_config(page_title="CivicFlow AI", page_icon="🏙️", layout="wide")
 db.init_db()
 
 st.session_state.setdefault("limiter", RateLimiter())
 st.session_state.setdefault("officer_ok", False)
 st.session_state.setdefault("last_result", None)
 
-PRIORITY_STYLE = {"P1": ("#b91c1c", "#fee2e2"), "P2": ("#c2410c", "#ffedd5"),
-                  "P3": ("#a16207", "#fef9c3"), "P4": ("#15803d", "#dcfce7")}
+# Priority colours (text, background) chosen for >= 4.5:1 contrast on the dark theme
+PRIORITY_STYLE = {"P1": ("#fecaca", "#7f1d1d"), "P2": ("#fed7aa", "#7c2d12"),
+                  "P3": ("#fde68a", "#713f12"), "P4": ("#bbf7d0", "#14532d")}
+PRIORITY_ACCENT = {"P1": "#ef4444", "P2": "#f97316", "P3": "#eab308", "P4": "#22c55e"}
 
 st.markdown("""
 <style>
-.block-container {padding-top: 1.6rem; max-width: 1200px;}
-.hero h1 {font-size: 1.9rem; margin: 0 0 .2rem 0;}
-.hero p {color: #475569; margin: 0 0 1rem 0;}
-.badge {display:inline-block; padding:.15rem .55rem; border-radius:999px; font-size:.78rem;
-        font-weight:600; margin-right:.35rem; border:1px solid transparent; white-space:nowrap;}
-.b-ai {background:#dbeafe; color:#1e40af;}
-.b-rule {background:#f1f5f9; color:#334155; border-color:#cbd5e1;}
-.b-cache {background:#ede9fe; color:#5b21b6;}
-.b-demo {background:#fef3c7; color:#92400e; border-color:#f59e0b;}
-.b-flag {background:#fee2e2; color:#991b1b;}
-.card {background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:1rem 1.2rem; margin-bottom:.8rem;}
-.card h3 {margin:.1rem 0 .4rem 0; font-size:1.15rem;}
-.muted {color:#64748b; font-size:.85rem;}
+:root {--cf-surface:#131c2e; --cf-surface-2:#182338; --cf-border:#24324b; --cf-muted:#94a3b8;
+       --cf-cyan:#22d3ee; --cf-cobalt:#3b82f6; --cf-mint:#34d399;}
+.block-container {padding-top: 1.4rem; max-width: 1240px;}
+.cf-brand {display:flex; align-items:center; gap:.55rem; font-weight:700; font-size:1.15rem; letter-spacing:.2px;}
+.cf-logo {width:30px; height:30px; border-radius:8px; display:grid; place-items:center;
+          background:linear-gradient(135deg,#0e7490,#1d4ed8); box-shadow:0 2px 10px rgba(34,211,238,.25);}
+.cf-brand b {color:var(--cf-cyan); font-weight:700;}
+.cf-hero {display:grid; grid-template-columns: 1.15fr .85fr; gap:1.5rem; align-items:center;
+          background:linear-gradient(160deg,#111a2c 0%,#0d1526 60%,#0b1220 100%);
+          border:1px solid var(--cf-border); border-radius:18px; padding:1.6rem 1.8rem; margin-bottom:1.2rem;}
+.cf-eyebrow {color:var(--cf-cyan); font-size:.78rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase;}
+.cf-hero h1 {font-size:2.15rem; line-height:1.15; margin:.35rem 0 .6rem 0; color:#f1f5f9;}
+.cf-hero p {color:#b6c2d4; margin:0; font-size:.98rem; max-width:560px;}
+.cf-pills {margin-top:.9rem; display:flex; gap:.45rem; flex-wrap:wrap;}
+.cf-pill {font-size:.76rem; color:#cbd5e1; border:1px solid var(--cf-border); background:var(--cf-surface);
+          padding:.2rem .6rem; border-radius:999px;}
+.cf-hero svg {width:100%; height:auto; max-height:210px;}
+.cf-flow {stroke-dasharray:6 6; animation:cfdash 2.4s linear infinite;}
+@keyframes cfdash {to {stroke-dashoffset:-24;}}
+@media (prefers-reduced-motion: reduce) {.cf-flow {animation:none;}}
+.page-title h2 {font-size:1.55rem; margin:0 0 .15rem 0;}
+.page-title p {color:var(--cf-muted); margin:0 0 1rem 0;}
+.badge {display:inline-block; padding:.16rem .6rem; border-radius:999px; font-size:.76rem;
+        font-weight:600; margin:0 .35rem .25rem 0; border:1px solid transparent; white-space:nowrap;}
+.b-ai {background:#0c3a4a; color:#a5f3fc; border-color:#155e75;}
+.b-rule {background:#1e293b; color:#e2e8f0; border-color:#475569;}
+.b-cache {background:#2e1065; color:#ddd6fe;}
+.b-demo {background:#451a03; color:#fde68a; border-color:#b45309;}
+.b-flag {background:#7f1d1d; color:#fecaca;}
+.b-ok {background:#064e3b; color:#a7f3d0;}
+.card {background:var(--cf-surface); border:1px solid var(--cf-border); border-radius:14px;
+       padding:1rem 1.2rem; margin-bottom:.8rem; box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 24px rgba(0,0,0,.25);}
+.card h3 {margin:.1rem 0 .45rem 0; font-size:1.2rem; color:#f1f5f9;}
+.muted {color:var(--cf-muted); font-size:.85rem;}
+.kpi {background:var(--cf-surface); border:1px solid var(--cf-border); border-radius:14px; padding:.85rem 1rem;
+      border-top:3px solid var(--kpi, var(--cf-cobalt));}
+.kpi .v {font-size:1.7rem; font-weight:700; color:#f8fafc; line-height:1.1;}
+.kpi .l {color:var(--cf-muted); font-size:.8rem; text-transform:uppercase; letter-spacing:.06em;}
+.qrow {border-left:4px solid var(--acc); padding-left:.6rem;}
 [data-testid="stMetricValue"] {font-size:1.35rem;}
-@media (max-width: 640px) { .hero h1 {font-size:1.45rem;} }
+@media (max-width: 820px) { .cf-hero {grid-template-columns:1fr;} .cf-hero h1 {font-size:1.6rem;} }
 </style>
 """, unsafe_allow_html=True)
+
+HERO_SVG = """
+<svg viewBox="0 0 360 210" role="img" aria-label="Illustration of a connected city network">
+  <defs>
+    <linearGradient id="bA" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#0f172a"/></linearGradient>
+    <linearGradient id="bB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#155e75"/><stop offset="1" stop-color="#0f172a"/></linearGradient>
+  </defs>
+  <polygon points="20,175 180,120 340,175 180,205" fill="#0f1a2e" stroke="#24324b"/>
+  <g>
+    <polygon points="60,160 90,150 90,85 60,95" fill="url(#bA)"/><polygon points="90,150 112,158 112,93 90,85" fill="#0c1a33"/>
+    <polygon points="125,150 160,138 160,45 125,57" fill="url(#bB)"/><polygon points="160,138 186,147 186,54 160,45" fill="#0b2230"/>
+    <polygon points="200,152 228,142 228,75 200,85" fill="url(#bA)"/><polygon points="228,142 250,150 250,83 228,75" fill="#0c1a33"/>
+    <polygon points="262,160 292,150 292,105 262,115" fill="url(#bB)"/><polygon points="292,150 312,157 312,112 292,105" fill="#0b2230"/>
+  </g>
+  <g fill="none" stroke-width="1.6">
+    <path class="cf-flow" d="M75 90 Q110 40 142 52" stroke="#22d3ee"/>
+    <path class="cf-flow" d="M142 52 Q190 30 214 80" stroke="#3b82f6"/>
+    <path class="cf-flow" d="M214 80 Q260 70 277 110" stroke="#22d3ee"/>
+    <path class="cf-flow" d="M75 90 Q170 120 277 110" stroke="#34d399" opacity=".7"/>
+  </g>
+  <g>
+    <circle cx="75" cy="90" r="5" fill="#ef4444"/><circle cx="75" cy="90" r="10" fill="none" stroke="#ef4444" opacity=".4"/>
+    <circle cx="142" cy="52" r="5" fill="#22d3ee"/><circle cx="214" cy="80" r="5" fill="#f59e0b"/>
+    <circle cx="277" cy="110" r="5" fill="#34d399"/>
+  </g>
+</svg>"""
 
 
 def badge(text: str, cls: str) -> str:
@@ -57,13 +111,19 @@ def source_badge(source: str) -> str:
             "fallback": badge("Rule-based estimate", "b-rule")}[source]
 
 
+def fmt_ms(ms: float) -> str:
+    return f"{ms / 1000:.1f} s" if ms >= 1000 else f"{ms:.0f} ms"
+
+
 def nice(cat: str) -> str:
     return cat.replace("_", " ").title()
 
 
 # ---------------- Sidebar ----------------
 with st.sidebar:
-    st.markdown("### 🛠️ Civic Triage Agent")
+    st.markdown('<div class="cf-brand"><span class="cf-logo" aria-hidden="true">⬢</span>'
+                '<span>CivicFlow <b>AI</b></span></div>', unsafe_allow_html=True)
+    st.caption("Civic incident triage")
     page = st.radio("Navigate", ["Report an issue", "Officer dashboard", "System metrics"],
                     label_visibility="collapsed")
     st.divider()
@@ -71,16 +131,23 @@ with st.sidebar:
         st.success(f"Gemini key configured\n\nModel: `{config.GEMINI_MODEL}`")
     else:
         st.warning("No GEMINI_API_KEY found. Running in **rule-based mode** - results are estimates.")
-    st.caption("Results labelled **AI analysis** come from Gemini. **Rule-based estimate** means the "
-               "keyword fallback was used. **SAMPLE** marks demo inputs.")
+    st.caption("**AI analysis** = Gemini result. **Rule-based estimate** = keyword fallback. "
+               "**SAMPLE** = demo input.")
 
 
 # ---------------- Citizen page ----------------
 def citizen_page():
-    st.markdown('<div class="hero"><h1>Report a civic issue</h1>'
-                '<p>Add a photo and a short description. The agent classifies the problem, rates its '
-                'severity, checks for duplicates and routes it to the right department.</p></div>',
-                unsafe_allow_html=True)
+    st.markdown(f'''<section class="cf-hero" aria-label="CivicFlow AI introduction">
+      <div><div class="cf-eyebrow">CivicFlow AI · Incident intelligence</div>
+        <h1>Smarter Cities. Faster Response.</h1>
+        <p>Photograph a pothole, garbage dump, broken streetlight or water leak. Gemini analyses the image,
+        transparent rules set the priority, duplicates are linked, and the report is routed to the right
+        department in seconds.</p>
+        <div class="cf-pills"><span class="cf-pill">Gemini multimodal analysis</span>
+        <span class="cf-pill">Deterministic prioritisation</span><span class="cf-pill">Duplicate detection</span>
+        <span class="cf-pill">Privacy: GPS &amp; phone numbers removed</span></div></div>
+      <div>{HERO_SVG}</div></section>''', unsafe_allow_html=True)
+    st.markdown('<div class="page-title"><h2>Report a civic issue</h2></div>', unsafe_allow_html=True)
 
     form_col, result_col = st.columns([1, 1], gap="large")
     with form_col:
@@ -95,7 +162,7 @@ def citizen_page():
                        "they are removed for your privacy.")
             submitted = st.form_submit_button("Submit report", type="primary", width="stretch")
         if photo:
-            st.image(photo, caption="Preview", width=260)
+            st.image(photo, caption="Preview of your photo", width=280)
 
     if submitted:
         if not st.session_state.limiter.allow():
@@ -104,9 +171,13 @@ def citizen_page():
             db.audit("rate_limited")
         else:
             try:
-                with result_col, st.spinner("Agent is analysing the report..."):
-                    st.session_state.last_result = (
-                        "ok", process_report(photo.getvalue() if photo else None, description, area))
+                with result_col, st.status("Analysing report...", expanded=True) as progress:
+                    st.write("Validating input and removing personal data...")
+                    st.write("Running AI analysis (Gemini) and applying priority rules...")
+                    result = process_report(photo.getvalue() if photo else None, description, area)
+                    progress.update(label=f"Report #{result.report_id} analysed in {fmt_ms(result.total_ms)}",
+                                    state="complete", expanded=False)
+                    st.session_state.last_result = ("ok", result)
             except ValidationError as e:
                 st.session_state.last_result = ("error", str(e))
                 db.audit("rejected_input", str(e))
@@ -146,7 +217,7 @@ def render_result(r):
     c4, c5, c6 = st.columns(3)
     c4.metric("Priority score", f"{r.priority} / 100")
     c5.metric("Response target", f"{rules_sla(r.label)} h")
-    c6.metric("Scan duration", f"{r.total_ms / 1000:.1f} s" if r.total_ms >= 100 else f"{r.total_ms:.0f} ms",
+    c6.metric("Scan duration", fmt_ms(r.total_ms),
               help="End-to-end time: validation, AI analysis (or cache), scoring and storage")
     st.write(f"**Recommended department:** {r.department}")
     st.caption(f"Why this priority: {r.explanation}")
@@ -170,8 +241,8 @@ def rules_sla(label: str) -> int:
 
 # ---------------- Officer page ----------------
 def officer_page():
-    st.markdown('<div class="hero"><h1>Officer dashboard</h1>'
-                '<p>Prioritised queue of citizen reports. Highest risk first.</p></div>',
+    st.markdown('<div class="page-title"><h2>Operations dashboard</h2>'
+                '<p>Prioritised incident queue built from stored citizen reports. Highest risk first.</p></div>',
                 unsafe_allow_html=True)
     if not st.session_state.officer_ok:
         with st.form("login", border=True):
@@ -184,22 +255,33 @@ def officer_page():
                 st.rerun()
             db.audit("officer_login_failed")
             st.error("Incorrect PIN.")
-        st.caption("The PIN is set by OFFICER_PIN in your .env file.")
+        st.caption("The PIN is set by OFFICER_PIN in .env (or Streamlit secrets when deployed).")
+        if config.USING_DEFAULT_PIN:
+            st.warning("The default demo PIN is in use. Set OFFICER_PIN before deploying.")
         return
 
-    open_all = db.list_reports("Open") + db.list_reports("In progress")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Active reports", len(open_all))
-    k2.metric("Critical (P1)", sum(r["priority_label"].startswith("P1") for r in open_all))
-    k3.metric("Safety hazards", sum(r["hazard"] for r in open_all))
-    k4.metric("Manual review", sum(r["department"] == "Manual review" for r in open_all))
+    everything = db.list_reports("All")
+    unresolved = [r for r in everything if r["status"] != "Resolved"]
+    kpis = [("Total reports", len(everything), "#3b82f6"),
+            ("Critical open (P1)", sum(r["priority_label"].startswith("P1") for r in unresolved), "#ef4444"),
+            ("Unresolved", len(unresolved), "#f59e0b"),
+            ("Resolved", len(everything) - len(unresolved), "#34d399")]
+    for col, (label, value, colour) in zip(st.columns(4), kpis):
+        col.markdown(f'<div class="kpi" style="--kpi:{colour}"><div class="l">{label}</div>'
+                     f'<div class="v">{value}</div></div>', unsafe_allow_html=True)
+    st.write("")
 
-    f1, f2, f3, f4 = st.columns([1, 2, 1, 1])
+    query = st.text_input("Search incidents", placeholder="Search by area, summary or description",
+                          label_visibility="visible")
+    f1, f2, f3, f4 = st.columns(4)
     status = f1.selectbox("Status", ["All"] + STATUSES, index=1)
-    dept = f2.selectbox("Department", ["All", "Manual review"] + list(DEPARTMENTS.values()))
+    category = f2.selectbox("Category", ["All"] + [c.value for c in Category], format_func=nice)
+    min_sev = f3.selectbox("Minimum severity", [1, 2, 3, 4, 5], format_func=lambda v: f"{v}+ / 5")
+    dept = f4.selectbox("Department", ["All", "Manual review"] + list(DEPARTMENTS.values()))
+
+    a1, a2, _ = st.columns([1, 1, 3])
     n_demo = db.count_demo_reports()
-    with f3:
-        st.write("")
+    with a1:
         if n_demo:
             if st.button("Remove sample data", width="stretch"):
                 db.delete_demo_reports()
@@ -211,13 +293,12 @@ def officer_page():
                 demo.load_samples()
             db.audit("demo_loaded")
             st.rerun()
-    with f4:
-        st.write("")
-        if st.button("Lock", width="stretch"):
+    with a2:
+        if st.button("Lock dashboard", width="stretch"):
             st.session_state.officer_ok = False
             st.rerun()
 
-    reports = db.list_reports(status, dept)
+    reports = filter_reports(db.list_reports(status, dept), query, category, min_sev)
     tab_queue, tab_detail = st.tabs(["Queue", "Incident detail"])
     with tab_detail:
         incident_detail()
@@ -230,8 +311,10 @@ def officer_page():
         st.markdown(f"**Queue · {len(reports)} report(s)**")
         for r in reports:
             prefix = "SAMPLE · " if r["is_demo"] else ""
-            title = (f"{prefix}#{r['id']} · {r['priority_label']} ({r['priority']}) · "
-                     f"{nice(r['category'])} · {r['area']} · {r['status']}")
+            dot = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "P4": "🟢"}[r["priority_label"][:2]]
+            title = (f"{dot} {prefix}#{r['id']} · {r['priority_label']} ({r['priority']}) · "
+                     f"{nice(r['category'])} · sev {r['severity']}/5 · {r['area']} · "
+                     f"{r['department']} · {r['status']}")
             with st.expander(title, expanded=r["priority_label"].startswith("P1") and r["status"] != "Resolved"):
                 badges = priority_badge(r["priority_label"]) + source_badge(r["source"])
                 if r["is_demo"]:
@@ -260,6 +343,20 @@ def officer_page():
                         db.update_status(r["id"], new_status)
                         db.audit("status_change", f"#{r['id']} -> {new_status}")
                         st.rerun()
+
+
+def filter_reports(reports: list[dict], query: str, category: str, min_sev: int) -> list[dict]:
+    q = (query or "").strip().lower()
+    out = []
+    for r in reports:
+        if category != "All" and r["category"] != category:
+            continue
+        if r["severity"] < min_sev:
+            continue
+        if q and q not in " ".join(str(r[k] or "") for k in ("area", "summary", "description")).lower():
+            continue
+        out.append(r)
+    return out
 
 
 def conf_text(r: dict) -> str:
@@ -314,8 +411,8 @@ def incident_detail():
 
 # ---------------- Metrics page ----------------
 def metrics_page():
-    st.markdown('<div class="hero"><h1>System metrics</h1>'
-                '<p>Live performance, efficiency and security figures recorded by the app.</p></div>',
+    st.markdown('<div class="page-title"><h2>System metrics</h2>'
+                '<p>Performance, efficiency and security figures recorded from real app activity.</p></div>',
                 unsafe_allow_html=True)
     m = db.metrics_summary()
     src = m["by_source"]
@@ -342,6 +439,13 @@ def metrics_page():
             st.bar_chart(pd.DataFrame(m["by_category"]), x="category", y="n", height=260)
         else:
             st.caption("No reports stored.")
+    pri = pd.Series([r["priority_label"] for r in db.list_reports("All")]).value_counts().sort_index()
+    if not pri.empty:
+        st.markdown("**Priority distribution (all stored reports)**")
+        st.bar_chart(pri.rename_axis("priority").reset_index(name="reports"), x="priority", y="reports",
+                     height=220, color="#22d3ee")
+    st.caption("Geographic hotspot map not shown: reports store a locality name, not GPS coordinates "
+               "(photo GPS is deliberately removed for privacy).")
     st.markdown("**Security audit log (latest 20)**")
     st.dataframe(pd.DataFrame(m["audit"]), width="stretch", hide_index=True)
 
