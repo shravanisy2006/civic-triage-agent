@@ -74,6 +74,11 @@ def init_db():
         cols = {r["name"] for r in c.execute("PRAGMA table_info(reports)")}
         if "is_demo" not in cols:
             c.execute("ALTER TABLE reports ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")
+        # keep stored area keys consistent with the current normalisation
+        for row in c.execute("SELECT id, area, area_key FROM reports").fetchall():
+            k = area_key(row["area"])
+            if k != row["area_key"]:
+                c.execute("UPDATE reports SET area_key = ? WHERE id = ?", (k, row["id"]))
 
 
 def delete_demo_reports() -> int:
@@ -86,8 +91,14 @@ def count_demo_reports() -> int:
         return c.execute("SELECT COUNT(*) FROM reports WHERE is_demo = 1").fetchone()[0]
 
 
+_AREA_STOPWORDS = {"near", "opp", "opposite", "the", "road", "rd", "lane", "no", "area"}
+
+
 def area_key(area: str) -> str:
-    return " ".join(area.lower().replace(",", " ").split())
+    """Order- and punctuation-insensitive locality key, so 'Sector 21, Pimpri' == 'pimpri sector-21'."""
+    import re
+    tokens = re.findall(r"[a-z0-9]+", area.lower())
+    return " ".join(sorted(t for t in set(tokens) if t not in _AREA_STOPWORDS)) or area.lower().strip()
 
 
 # ---------- Cache ----------
@@ -117,6 +128,34 @@ def find_duplicates(area: str, category: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def find_same_image(image_hash: str) -> int | None:
+    with connect() as c:
+        row = c.execute("SELECT id FROM reports WHERE image_hash = ? ORDER BY id LIMIT 1", (image_hash,)).fetchone()
+    return row["id"] if row else None
+
+
+def get_report(report_id: int) -> dict | None:
+    with connect() as c:
+        row = c.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def report_history(report_id: int) -> list[dict]:
+    """Audit entries about one report (creation, status changes)."""
+    with connect() as c:
+        rows = c.execute(
+            "SELECT created_at, event, detail FROM audit_log WHERE detail = ? OR detail LIKE ? ORDER BY id",
+            (f"#{report_id}", f"#{report_id} %")).fetchall()
+    return [dict(r) for r in rows]
+
+
+def linked_reports(report_id: int) -> list[dict]:
+    with connect() as c:
+        rows = c.execute("SELECT id, created_at, area, status FROM reports WHERE duplicate_of = ? ORDER BY id",
+                         (report_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def insert_report(r: dict) -> int:
     cols = list(r.keys()) + ["created_at", "area_key"]
     vals = list(r.values()) + [_now(), area_key(r["area"])]
@@ -126,11 +165,17 @@ def insert_report(r: dict) -> int:
         return cur.lastrowid
 
 
-def bump_priority(report_id: int, new_priority: int, new_label: str):
+def bump_priority(report_id: int, new_priority: int, new_label: str, by_report: int | None = None):
+    """Raise an existing report's priority when a duplicate arrives, and record why."""
+    note = f" · raised to {new_priority} by duplicate report" + (f" #{by_report}" if by_report else "")
     with connect() as c:
         c.execute(
-            "UPDATE reports SET priority = MAX(priority, ?), priority_label = CASE WHEN ? > priority THEN ? ELSE priority_label END WHERE id = ?",
-            (new_priority, new_priority, new_label, report_id),
+            """UPDATE reports SET
+                 explanation = CASE WHEN ? > priority THEN explanation || ? ELSE explanation END,
+                 priority_label = CASE WHEN ? > priority THEN ? ELSE priority_label END,
+                 priority = MAX(priority, ?)
+               WHERE id = ?""",
+            (new_priority, note, new_priority, new_label, new_priority, report_id),
         )
 
 

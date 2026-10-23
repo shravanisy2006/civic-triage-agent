@@ -135,23 +135,32 @@ def render_result(r):
     st.markdown(f'<div class="card"><div class="muted">Report #{r.report_id} registered</div>'
                 f'<h3>{escape(nice(a.category.value))}</h3>{badges}'
                 f'<p style="margin:.6rem 0 0 0">{escape(a.summary)}</p></div>', unsafe_allow_html=True)
+    if r.source == "fallback":
+        st.warning("**Gemini was not used - this is a rule-based keyword estimate, not an AI result.** "
+                   f"Reason: {r.fallback_reason or 'unavailable'}.")
     c1, c2, c3 = st.columns(3)
     c1.metric("Severity", f"{a.severity} / 5")
-    c2.metric("Priority score", f"{r.priority} / 100")
-    c3.metric("Response target", f"{rules_sla(r.label)} h")
-    st.write(f"**Routed to:** {r.department}")
-    if r.source == "fallback":
-        st.warning("Gemini was not used for this report, so this is a keyword-based estimate. "
-                   f"Reason: {ai.last_error or 'unavailable'}.")
+    c2.metric("Hazard", "Yes" if a.hazard else "No")
+    c3.metric("AI confidence", f"{a.confidence:.0%}" if r.source != "fallback" else "n/a",
+              help="Gemini's self-reported confidence in the category. Not available for rule-based estimates.")
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Priority score", f"{r.priority} / 100")
+    c5.metric("Response target", f"{rules_sla(r.label)} h")
+    c6.metric("Scan duration", f"{r.total_ms / 1000:.1f} s" if r.total_ms >= 100 else f"{r.total_ms:.0f} ms",
+              help="End-to-end time: validation, AI analysis (or cache), scoring and storage")
+    st.write(f"**Recommended department:** {r.department}")
+    st.caption(f"Why this priority: {r.explanation}")
+    if r.same_photo_of:
+        st.info(f"This exact photo was already submitted in report #{r.same_photo_of}.")
     if r.duplicate_of:
-        st.info(f"Already reported as #{r.duplicate_of}. Your report was linked to it and raised its priority.")
+        st.info(f"Possible duplicate: {r.duplicate_count} open report(s) of the same type in this area "
+                f"(first: #{r.duplicate_of}). Your report was linked to it and raised its priority.")
     if r.flagged:
         st.warning("Your description contained unusual instructions, so it was sent for manual review.")
     with st.expander("How the agent decided"):
         for i, s in enumerate(r.steps, 1):
             st.write(f"{i}. {s}")
-        st.write(f"**{r.explanation}**")
-        st.caption(f"Confidence {a.confidence:.2f} · processing time {r.latency_ms:.0f} ms")
+        st.caption(f"Analysis source: {r.source} · AI step {r.latency_ms:.0f} ms · total {r.total_ms:.0f} ms")
 
 
 def rules_sla(label: str) -> int:
@@ -209,44 +218,98 @@ def officer_page():
             st.rerun()
 
     reports = db.list_reports(status, dept)
-    if not reports:
-        st.info("**No reports match these filters.** New citizen reports will appear here - "
-                "or click *Load sample data* to try the dashboard.")
-        return
+    tab_queue, tab_detail = st.tabs(["Queue", "Incident detail"])
+    with tab_detail:
+        incident_detail()
+    with tab_queue:
+        if not reports:
+            st.info("**No reports match these filters.** New citizen reports will appear here - "
+                    "or click *Load sample data* to try the dashboard.")
+            return
 
-    st.markdown(f"**Queue · {len(reports)} report(s)**")
-    for r in reports:
-        prefix = "SAMPLE · " if r["is_demo"] else ""
-        title = (f"{prefix}#{r['id']} · {r['priority_label']} ({r['priority']}) · "
-                 f"{nice(r['category'])} · {r['area']} · {r['status']}")
-        with st.expander(title, expanded=r["priority_label"].startswith("P1") and r["status"] != "Resolved"):
-            badges = priority_badge(r["priority_label"]) + source_badge(r["source"])
-            if r["is_demo"]:
-                badges += badge("SAMPLE input", "b-demo")
-            if r["hazard"]:
-                badges += badge("Safety hazard", "b-flag")
-            if r["flagged"]:
-                badges += badge("Possible prompt injection", "b-flag")
-            left, right = st.columns([1, 2])
-            with left:
-                if r["image"]:
-                    st.image(r["image"], width="stretch")
-                else:
-                    st.caption("No photo submitted")
-            with right:
-                st.markdown(badges, unsafe_allow_html=True)
-                st.write(f"**Summary:** {r['summary']}")
-                st.write(f"**Citizen said:** {r['description'] or '-'}")
-                st.write(f"**Department:** {r['department']} · **Severity:** {r['severity']}/5")
-                st.caption(f"{r['explanation']} · confidence {r['confidence']:.2f} · submitted {r['created_at']} UTC")
-                if r["duplicate_of"]:
-                    st.caption(f"Linked as duplicate of #{r['duplicate_of']}")
-                new_status = st.selectbox("Update status", STATUSES, index=STATUSES.index(r["status"]),
-                                          key=f"s{r['id']}")
-                if new_status != r["status"]:
-                    db.update_status(r["id"], new_status)
-                    db.audit("status_change", f"#{r['id']} -> {new_status}")
-                    st.rerun()
+        st.markdown(f"**Queue · {len(reports)} report(s)**")
+        for r in reports:
+            prefix = "SAMPLE · " if r["is_demo"] else ""
+            title = (f"{prefix}#{r['id']} · {r['priority_label']} ({r['priority']}) · "
+                     f"{nice(r['category'])} · {r['area']} · {r['status']}")
+            with st.expander(title, expanded=r["priority_label"].startswith("P1") and r["status"] != "Resolved"):
+                badges = priority_badge(r["priority_label"]) + source_badge(r["source"])
+                if r["is_demo"]:
+                    badges += badge("SAMPLE input", "b-demo")
+                if r["hazard"]:
+                    badges += badge("Safety hazard", "b-flag")
+                if r["flagged"]:
+                    badges += badge("Possible prompt injection", "b-flag")
+                left, right = st.columns([1, 2])
+                with left:
+                    if r["image"]:
+                        st.image(r["image"], width="stretch")
+                    else:
+                        st.caption("No photo submitted")
+                with right:
+                    st.markdown(badges, unsafe_allow_html=True)
+                    st.write(f"**Summary:** {r['summary']}")
+                    st.write(f"**Citizen said:** {r['description'] or '-'}")
+                    st.write(f"**Department:** {r['department']} · **Severity:** {r['severity']}/5")
+                    st.caption(f"{r['explanation']} · confidence {conf_text(r)} · submitted {r['created_at']} UTC")
+                    if r["duplicate_of"]:
+                        st.caption(f"Linked as duplicate of #{r['duplicate_of']}")
+                    new_status = st.selectbox("Update status", STATUSES, index=STATUSES.index(r["status"]),
+                                              key=f"s{r['id']}")
+                    if new_status != r["status"]:
+                        db.update_status(r["id"], new_status)
+                        db.audit("status_change", f"#{r['id']} -> {new_status}")
+                        st.rerun()
+
+
+def conf_text(r: dict) -> str:
+    return "n/a (rule-based)" if r["source"] == "fallback" else f"{r['confidence']:.0%}"
+
+
+def incident_detail():
+    all_reports = db.list_reports("All")
+    if not all_reports:
+        st.info("**No incidents stored yet.**")
+        return
+    ids = sorted(r["id"] for r in all_reports)
+    rid = st.selectbox("Select incident", ids, index=len(ids) - 1, format_func=lambda i: f"#{i}")
+    r = db.get_report(rid)
+    badges = priority_badge(r["priority_label"]) + source_badge(r["source"])
+    if r["is_demo"]:
+        badges += badge("SAMPLE input", "b-demo")
+    if r["hazard"]:
+        badges += badge("Safety hazard", "b-flag")
+    if r["flagged"]:
+        badges += badge("Possible prompt injection", "b-flag")
+    st.markdown(f'<div class="card"><div class="muted">Incident #{r["id"]} · {escape(r["area"])} · '
+                f'submitted {escape(r["created_at"])} UTC</div><h3>{escape(nice(r["category"]))}</h3>{badges}'
+                f'<p style="margin:.6rem 0 0 0">{escape(r["summary"] or "")}</p></div>', unsafe_allow_html=True)
+    left, right = st.columns([1, 2])
+    with left:
+        if r["image"]:
+            st.image(r["image"], width="stretch", caption="Photo (metadata removed)")
+        else:
+            st.caption("No photo submitted")
+    with right:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Severity", f"{r['severity']} / 5")
+        c2.metric("Priority", f"{r['priority']} / 100")
+        c3.metric("Status", r["status"])
+        st.write(f"**Department:** {r['department']} · **Response target:** {rules_sla(r['priority_label'])} h")
+        st.write(f"**Citizen said:** {r['description'] or '-'}")
+        st.caption(f"{r['explanation']} · AI confidence {conf_text(r)}")
+        if r["duplicate_of"]:
+            st.caption(f"Duplicate of incident #{r['duplicate_of']}")
+        linked = db.linked_reports(r["id"])
+        if linked:
+            st.write(f"**{len(linked)} linked duplicate report(s):** " +
+                     ", ".join(f"#{x['id']} ({x['status']})" for x in linked))
+    st.markdown("**History**")
+    hist = db.report_history(r["id"])
+    if hist:
+        st.dataframe(pd.DataFrame(hist), width="stretch", hide_index=True)
+    else:
+        st.caption("No recorded events.")
 
 
 # ---------------- Metrics page ----------------

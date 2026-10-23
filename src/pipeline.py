@@ -23,6 +23,9 @@ class TriageResult:
     explanation: str
     flagged: bool
     steps: list[str]
+    fallback_reason: str = ""          # why Gemini was not used (empty when it was)
+    total_ms: float = 0.0              # end-to-end scan duration
+    same_photo_of: int | None = None   # earlier report that used the identical photo
 
 
 def process_report(image_bytes: bytes | None, description: str, area: str,
@@ -49,15 +52,21 @@ def process_report(image_bytes: bytes | None, description: str, area: str,
         steps.append("Possible prompt-injection detected - flagged for review")
         db.audit("injection_flag", redacted)
 
+    same_photo = db.find_same_image(img_hash) if img_hash else None
+    if same_photo:
+        steps.append(f"Identical photo already submitted in report #{same_photo}")
+
     # 2. Cache lookup (same image + same text => no API call)
     cache_key = hashlib.sha256(f"{img_hash}|{redacted.lower()}".encode()).hexdigest()
     cached = db.cache_get(cache_key)
+    fallback_reason = ""
     if cached:
         analysis, source = IssueAnalysis.model_validate(cached), "cache"
         latency = (time.perf_counter() - t0) * 1000
         steps.append("Cache hit - reused earlier AI analysis (0 API calls)")
     else:
         analysis, source, latency = ai.analyze(clean_img, redacted)
+        fallback_reason = ai.last_error if source == "fallback" else ""
         steps.append("Analysed by Gemini (multimodal, schema-validated)" if source == "gemini"
                      else f"Gemini unavailable ({ai.last_error}) - rule-based fallback used")
         if source == "gemini":
@@ -76,7 +85,6 @@ def process_report(image_bytes: bytes | None, description: str, area: str,
     steps.append(f"Priority {label} ({score}/100), routed to {department}")
     if duplicate_of:
         steps.append(f"Linked to existing report #{duplicate_of} ({len(dups)} similar open)")
-        db.bump_priority(duplicate_of, score, label)
 
     # 4. Store
     report_id = db.insert_report({
@@ -88,6 +96,9 @@ def process_report(image_bytes: bytes | None, description: str, area: str,
         "is_demo": int(is_demo),
     })
     db.audit("report_created", f"#{report_id} {label} {department}")
+    if duplicate_of:
+        db.bump_priority(duplicate_of, score, label, by_report=report_id)
 
     return TriageResult(report_id, analysis, source, latency, score, label, department,
-                        duplicate_of, len(dups), explanation, flagged, steps)
+                        duplicate_of, len(dups), explanation, flagged, steps,
+                        fallback_reason, (time.perf_counter() - t0) * 1000, same_photo)

@@ -21,7 +21,7 @@ queue as minor litter. Citizens get no feedback.
    P1–P4 label, department and SLA — every decision is explained.
 4. **Duplicate detection** links repeat reports of the same issue in the same area and raises the
    original's priority instead of cluttering the queue.
-5. **Officer dashboard** (PIN-protected) shows the queue highest-priority first; officers update status.
+5. **Officer dashboard** (PIN-protected) shows the queue highest-priority first; officers update status, and an **Incident detail** view shows the photo, scoring, linked duplicates and full history.
 6. **Metrics page** shows latency, cache hit rate, fallback rate and a security audit log.
 
 ## Architecture
@@ -87,8 +87,8 @@ Run `python -m eval.run_eval` on 15 labelled reports (including one injection at
 \*The fallback's keywords were tuned on these same 15 samples, so its numbers are optimistic;
 it exists to keep the service running, not to replace Gemini.
 
-**21 automated tests** (`pytest`) cover upload validation, EXIF removal, PII redaction, injection
-detection, rate limiting, scoring, routing, the full pipeline, and the Gemini path (valid output,
+**24 automated tests** (`pytest`) cover upload validation, EXIF removal, PII redaction, injection
+detection, rate limiting, scoring, routing, persistence, duplicate matching, status history, the full pipeline, and the Gemini path (valid output,
 invalid JSON + retry, out-of-range values, timeouts, bad key without leaking it, caching) using a
 fake client, so they run offline.
 

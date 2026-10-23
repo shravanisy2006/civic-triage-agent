@@ -106,3 +106,52 @@ def test_pipeline_end_to_end(tmp_path, monkeypatch):
     assert r1.department == "Solid Waste Management"
     assert r2.duplicate_of == r1.report_id
     assert len(db.list_reports("Open")) == 2
+
+
+def test_area_key_is_order_and_punctuation_insensitive():
+    assert db.area_key("Sector 21, Pimpri") == db.area_key("pimpri  sector-21")
+    assert db.area_key("Pimpri") != db.area_key("Chinchwad")
+
+
+def test_persistence_duplicates_status_history_and_metrics(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "p.db")
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "")
+    db.init_db()
+    from src.pipeline import process_report
+
+    img = make_image()
+    r1 = process_report(img, "Garbage pile near market", "Sector 21, Pimpri")
+    r2 = process_report(img, "Garbage pile near market", "pimpri sector-21")
+    assert r2.report_id != r1.report_id                      # unique IDs
+    assert r2.duplicate_of == r1.report_id                   # matched against the saved report
+    assert r2.same_photo_of == r1.report_id                  # identical photo detected
+    assert r2.source == "fallback" and r2.fallback_reason    # fallback is identified, with a reason
+
+    db.update_status(r1.report_id, "In progress")
+    db.audit("status_change", f"#{r1.report_id} -> In progress")
+    db.init_db()                                             # simulate an app restart / rerun
+    assert db.get_report(r1.report_id)["status"] == "In progress"
+    events = [h["event"] for h in db.report_history(r1.report_id)]
+    assert events == ["report_created", "status_change"]
+    assert [x["id"] for x in db.linked_reports(r1.report_id)] == [r2.report_id]
+
+    m = db.metrics_summary()
+    assert m["by_source"]["fallback"]["n"] == 2              # metrics reflect real activity
+
+    # a resolved report is no longer treated as an open duplicate
+    db.update_status(r1.report_id, "Resolved")
+    db.update_status(r2.report_id, "Resolved")
+    r3 = process_report(None, "Garbage again near market", "Pimpri Sector 21")
+    assert r3.duplicate_of is None
+
+
+def test_duplicate_bump_updates_explanation(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "b.db")
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "")
+    db.init_db()
+    from src.pipeline import process_report
+    r1 = process_report(None, "Garbage pile near market", "Ravet")
+    r2 = process_report(None, "Garbage pile near market again", "Ravet")
+    stored = db.get_report(r1.report_id)
+    assert stored["priority"] == r2.priority > r1.priority
+    assert f"raised to {r2.priority} by duplicate report #{r2.report_id}" in stored["explanation"]
